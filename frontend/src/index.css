@@ -1,3 +1,25 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+input, textarea, select { text-transform: uppercase; }
+
+/* Page background */
+body {
+  @apply bg-gradient-to-br from-white via-brand-light to-white text-slate-800;
+}
+
+/* Reusable card */
+.card {
+  @apply bg-white rounded-xl2 shadow-soft p-6 border border-slate-100;
+}
+
+/* Inputs & buttons */
+.input { @apply w-full rounded-lg border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-primary/30; }
+.btn   { @apply inline-flex items-center justify-center rounded-lg px-4 py-2 font-medium transition; }
+.btn-primary { @apply bg-brand-primary text-white hover:bg-brand-primary2; }
+.btn-ghost   { @apply text-brand-primary hover:text-brand-primary2; }
+/* DISPLAY ALL UI TEXT IN CAPS (inputs left normal for emails) */
+.caps, .caps *:not(input):not(textarea) { 
+  text-transform: uppercase; 
+  letter-spacing: 0.02em; 
+}
