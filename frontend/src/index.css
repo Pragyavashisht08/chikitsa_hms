@@ -1,7 +1,16 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
-input, textarea, select { text-transform: uppercase; }
+
+/* Make all form fields uppercase by default */
+input, textarea, select {
+  text-transform: uppercase;
+}
+
+/* But keep email fields lowercase */
+input[type="email"], .email-input {
+  text-transform: lowercase !important;
+}
 
 /* Page background */
 body {
@@ -14,12 +23,22 @@ body {
 }
 
 /* Inputs & buttons */
-.input { @apply w-full rounded-lg border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-primary/30; }
-.btn   { @apply inline-flex items-center justify-center rounded-lg px-4 py-2 font-medium transition; }
-.btn-primary { @apply bg-brand-primary text-white hover:bg-brand-primary2; }
-.btn-ghost   { @apply text-brand-primary hover:text-brand-primary2; }
-/* DISPLAY ALL UI TEXT IN CAPS (inputs left normal for emails) */
-.caps, .caps *:not(input):not(textarea) { 
-  text-transform: uppercase; 
-  letter-spacing: 0.02em; 
+.input {
+  @apply w-full rounded-lg border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-primary/30;
+}
+.btn {
+  @apply inline-flex items-center justify-center rounded-lg px-4 py-2 font-medium transition;
+}
+.btn-primary {
+  @apply bg-brand-primary text-white hover:bg-brand-primary2;
+}
+.btn-ghost {
+  @apply text-brand-primary hover:text-brand-primary2;
+}
+
+/* Keep headings/captions in uppercase */
+.caps,
+.caps *:not(input):not(textarea):not(select) {
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
 }
