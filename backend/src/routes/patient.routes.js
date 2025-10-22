@@ -1,20 +1,26 @@
+// backend/src/routes/patient.routes.js
 import express from "express";
 import path from "path";
 import fs from "fs";
 import multer from "multer";
+import { fileURLToPath } from "url";
 import Patient from "../models/Patient.js";
 import Suggestion from "../models/Suggestion.js";
 
 const router = express.Router();
 
-// ---------- UPLOAD DIRECTORY SETUP ----------
-const uploadDir = path.join(process.cwd(), "backend", "uploads");
-if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+/* ---------- ESM __dirname ---------- */
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-// ---------- MULTER STORAGE ----------
+/* ---------- UPLOAD DIRECTORY (shared with report.routes.js) ---------- */
+const uploadDir = path.join(__dirname, "../data/reports");
+fs.mkdirSync(uploadDir, { recursive: true });
+
+/* ---------- MULTER: expect a single field named "file" ---------- */
 const storage = multer.diskStorage({
-  destination: (_, __, cb) => cb(null, uploadDir),
-  filename: (_, file, cb) =>
+  destination: (_req, _file, cb) => cb(null, uploadDir),
+  filename: (_req, file, cb) =>
     cb(null, Date.now() + "-" + file.originalname.replace(/\s+/g, "_")),
 });
 const upload = multer({ storage });
@@ -125,9 +131,8 @@ router.post("/:id/visits", async (req, res) => {
     patient.visits.push(visit);
     await patient.save();
 
-    // --- Save suggestions for autocomplete ---
+    // suggestions upsert
     const upserts = [];
-
     if (visit.symptoms) {
       visit.symptoms
         .split(",")
@@ -135,11 +140,9 @@ router.post("/:id/visits", async (req, res) => {
         .filter(Boolean)
         .forEach((t) => upserts.push({ type: "SYMPTOM", text: t.toUpperCase() }));
     }
-
     (visit.medicines || []).forEach((m) =>
       upserts.push({ type: "MEDICINE", text: String(m).toUpperCase() })
     );
-
     await Promise.all(
       upserts.map((s) =>
         Suggestion.updateOne(
@@ -183,39 +186,41 @@ router.get("/:id/visits", async (req, res) => {
 });
 
 /**
- * ✅ REPORT UPLOAD (linked to visit)
+ * ✅ REPORT UPLOAD (linked to visit) — expects FormData key "file"
+ * Saves metadata so the /download route in report.routes.js can stream the file.
  */
-router.post(
-  "/:id/visits/:vid/reports",
-  upload.single("file"),
-  async (req, res) => {
-    try {
-      const { id, vid } = req.params;
-      const patient = await Patient.findById(id);
-      if (!patient)
-        return res.status(404).json({ message: "Patient not found" });
+router.post("/:id/visits/:vid/reports", upload.single("file"), async (req, res) => {
+  try {
+    const { id, vid } = req.params;
+    const patient = await Patient.findById(id);
+    if (!patient) return res.status(404).json({ message: "Patient not found" });
 
-      const visit =
-        patient.visits.id(vid) ||
-        patient.visits.find((x) => String(x._id) === vid);
-      if (!visit)
-        return res.status(404).json({ message: "Visit not found" });
+    const visit =
+      patient.visits.id(vid) ||
+      patient.visits.find((x) => String(x._id) === vid);
+    if (!visit) return res.status(404).json({ message: "Visit not found" });
 
-      visit.reports = visit.reports || [];
-      visit.reports.push({
-        url: `/uploads/${req.file.filename}`,
-        name: req.file.originalname,
-        uploadedAt: new Date(),
-      });
+    if (!req.file) return res.status(400).json({ message: "No file provided" });
 
-      await patient.save();
-      res.status(201).json(visit.reports);
-    } catch (e) {
-      console.error("❌ Error uploading report:", e);
-      res.status(400).json({ message: e.message });
-    }
+    visit.reports = visit.reports || [];
+    visit.reports.push({
+      name: req.file.originalname,
+      storedName: req.file.filename,
+      mime: req.file.mimetype,
+      size: req.file.size,
+      uploadedAt: new Date(),
+    });
+
+    const saved = visit.reports[visit.reports.length - 1];
+    saved.url = `/api/patients/${id}/visits/${vid}/reports/${saved._id}/download`;
+
+    await patient.save();
+    res.status(201).json(visit.reports);
+  } catch (e) {
+    console.error("❌ Error uploading report:", e);
+    res.status(400).json({ message: e.message || "Upload failed" });
   }
-);
+});
 
 /**
  * ✅ LIST REPORTS FOR A VISIT
@@ -224,14 +229,10 @@ router.get("/:id/visits/:vid/reports", async (req, res) => {
   try {
     const { id, vid } = req.params;
     const patient = await Patient.findById(id).lean();
-    if (!patient)
-      return res.status(404).json({ message: "Patient not found" });
+    if (!patient) return res.status(404).json({ message: "Patient not found" });
 
-    const visit = (patient.visits || []).find(
-      (x) => String(x._id) === vid
-    );
-    if (!visit)
-      return res.status(404).json({ message: "Visit not found" });
+    const visit = (patient.visits || []).find((x) => String(x._id) === vid);
+    if (!visit) return res.status(404).json({ message: "Visit not found" });
 
     res.json(visit.reports || []);
   } catch (e) {

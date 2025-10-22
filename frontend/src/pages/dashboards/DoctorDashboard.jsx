@@ -7,7 +7,6 @@ import {
   ClipboardList,
   History,
   X,
-  LogOut,
   FileText,
   Upload,
   Printer,
@@ -41,6 +40,94 @@ function useDebounced(value, ms = 250) {
   return v;
 }
 
+// ✅ safer URL resolver: supports absolute URLs or API-relative paths only
+const resolveUrl = (u) => {
+  if (!u) return "";
+
+  // Absolute link? Just return.
+  if (/^https?:\/\//i.test(u)) return u;
+
+  // If it starts with /api/, build against root of backend (strip trailing /api)
+  const base = api?.defaults?.baseURL?.replace(/\/$/, "") || "";
+  if (u.startsWith("/api/")) {
+    const root = base.replace(/\/api$/, "");
+    return `${root}${u}`;
+  }
+
+  // Otherwise, just return as-is (fallback fetching handles it)
+  return u;
+};
+
+const LS_TEMPLATE_KEY = "doctor_template_meta_v1";
+
+/* -------------------- Tiny in-file modal -------------------- */
+function TemplateEditor({ open, tpl, value, onClose, onSave }) {
+  if (!open || !tpl) return null;
+  return (
+    <div className="fixed inset-0 z-[100] bg-black/40 flex items-center justify-center p-4">
+      <div className="w-full max-w-2xl bg-white rounded-2xl shadow-xl border">
+        <div className="p-4 border-b flex items-center justify-between">
+          <h4 className="font-semibold text-slate-900">Edit Template Defaults</h4>
+          <button className="p-1 rounded hover:bg-slate-100" onClick={onClose} aria-label="Close">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <div className="p-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {[
+            ["doctorName", "Doctor Name"],
+            ["designation", "Designation"],
+            ["regNo", "Registration No"],
+            ["hospitalName", "Hospital Name"],
+            ["hospitalAddress", "Hospital Address"],
+            ["hospitalPhone", "Hospital Phone"],
+            ["hospitalEmail", "Hospital Email"],
+          ].map(([key, label]) => (
+            <div key={key}>
+              <label className="block text-xs font-medium text-slate-700 mb-1">{label}</label>
+              <input
+                className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                value={value[key] || ""}
+                onChange={(e) => onSave({ ...value, [key]: e.target.value })}
+              />
+            </div>
+          ))}
+          <div className="sm:col-span-2">
+            <label className="block text-xs font-medium text-slate-700 mb-1">Custom Note (optional)</label>
+            <textarea
+              rows={3}
+              className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+              value={value.customNote || ""}
+              onChange={(e) => onSave({ ...value, customNote: e.target.value })}
+            />
+          </div>
+        </div>
+
+        <div className="p-4 border-t flex items-center justify-end gap-2">
+          <button
+            className="px-3 py-2 rounded-lg text-sm font-semibold text-slate-700 bg-slate-200 hover:bg-slate-300"
+            onClick={onClose}
+          >
+            Cancel
+          </button>
+          <button
+            className="px-3 py-2 rounded-lg text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700"
+            onClick={() => {
+              try {
+                localStorage.setItem(LS_TEMPLATE_KEY, JSON.stringify(value));
+              } catch {}
+              toast.success("Template defaults saved");
+              onClose();
+            }}
+          >
+            Save
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* -------------------- PAGE -------------------- */
 export default function DoctorDashboard() {
   const [date, setDate] = useState(todayISO());
@@ -48,7 +135,7 @@ export default function DoctorDashboard() {
   const qDeb = useDebounced(q, 250);
 
   const [patients, setPatients] = useState([]);
-   const [active, setActive] = useState(null);
+  const [active, setActive] = useState(null);
   const [loading, setLoading] = useState(false);
 
   const [expanded, setExpanded] = useState({
@@ -98,6 +185,29 @@ export default function DoctorDashboard() {
   const [uploading, setUploading] = useState(false);
   const [tq, setTq] = useState("");
 
+  // Editable template defaults (used by Certificates & Templates)
+  const [templateData, setTemplateData] = useState({
+    doctorName: "Dr. John Doe",
+    designation: "Physician",
+    regNo: "MED12345",
+    hospitalName: "MediCare Hospital",
+    hospitalAddress: "123 Healthcare Street, New Delhi, India",
+    hospitalPhone: "+91 9876543210",
+    hospitalEmail: "contact@medicare.com",
+    customNote: "",
+  });
+  const [editingTpl, setEditingTpl] = useState(null); // when set, opens editor modal
+
+  useEffect(() => {
+    // Load saved template defaults
+    try {
+      const saved = JSON.parse(localStorage.getItem(LS_TEMPLATE_KEY) || "{}");
+      if (saved && typeof saved === "object") {
+        setTemplateData((s) => ({ ...s, ...saved }));
+      }
+    } catch {}
+  }, []);
+
   const TEMPLATES = [
     { id: 1, title: "Medical Certificate", category: "CERTIFICATE" },
     { id: 2, title: "Fitness Certificate", category: "CERTIFICATE" },
@@ -141,8 +251,7 @@ export default function DoctorDashboard() {
     } finally {
       setLoading(false);
     }
-  // (from earlier fix) keep active OUT to avoid flicker
-  }, [qDeb, date]);
+  }, [qDeb, date]); // keep 'active' out to avoid flicker
 
   useEffect(() => {
     load();
@@ -312,7 +421,7 @@ export default function DoctorDashboard() {
     return [...active.visits].sort((a, b) => new Date(b.date) - new Date(a.date))[0] || null;
   }, [active]);
 
-  // ✅ ONLY REQUIRED CHANGE: build FormData with expected keys and add robust fallback
+  // ✅ robust upload (tries multiple field names) + unique filename
   const onUploadReport = async (e) => {
     const file = e.target.files?.[0];
     e.target.value = "";
@@ -321,25 +430,38 @@ export default function DoctorDashboard() {
     if (!newestVisit?._id && !newestVisit?.id)
       return toast.warning("Please save a visit before uploading a report");
 
+    setUploading(true);
     try {
-      setUploading(true);
+      const pid = active._id || active.id;
+      const vid = newestVisit._id || newestVisit.id;
 
-      const fd = new FormData();
-      // Most backends expect "file" and often a "name" field
-      fd.append("file", file, file.name);
-      fd.append("name", file.name);
+      const ext = file.name.includes(".") ? file.name.substring(file.name.lastIndexOf(".")) : "";
+      const uniqueName = `${active.uniqueId || "PAT"}_${vid}_${Date.now()}${ext || ""}`;
 
-      // First try your provided helper (it may set correct headers/interceptors)
-      try {
-        await uploadReport(active._id || active.id, newestVisit._id || newestVisit.id, fd);
-      } catch (err) {
-        // Fallback to explicit endpoint with multipart header if helper enforces wrong content-type
-        await api.post(
-          `/patients/${active._id || active.id}/visits/${newestVisit._id || newestVisit.id}/reports`,
-          fd,
-          { headers: { "Content-Type": "multipart/form-data" } }
-        );
+      const attempts = [
+        (fd) => (fd.append("file", file, uniqueName), fd.append("name", uniqueName), fd),
+        (fd) => (fd.append("report", file, uniqueName), fd.append("filename", uniqueName), fd),
+        (fd) => (fd.append("document", file, uniqueName), fd.append("fileName", uniqueName), fd),
+      ];
+
+      let ok = false, lastErr;
+      for (const build of attempts) {
+        const fd = build(new FormData());
+        try {
+          if (typeof uploadReport === "function") {
+            await uploadReport(pid, vid, fd);
+          } else {
+           await api.post(`/patients/${pid}/visits/${vid}/reports`, fd);
+
+          }
+          ok = true;
+          break;
+        } catch (err) {
+          lastErr = err;
+        }
       }
+
+      if (!ok) throw lastErr || new Error("Upload failed");
 
       await load();
       toast.success("Report uploaded");
@@ -356,17 +478,22 @@ export default function DoctorDashboard() {
     }
   };
 
+  // Aggregate reports with normalized names/urls
   const allReports = useMemo(() => {
     if (!active?.visits?.length) return [];
     const out = [];
     for (const v of active.visits) {
-      (v.reports || []).forEach((r) =>
+      (v.reports || []).forEach((r) => {
+        const url = resolveUrl(r?.url || r?.fileUrl || r?.link || r?.path || "");
+        const fallbackName = decodeURIComponent((url.split("/").pop() || "").split("?")[0] || "REPORT");
         out.push({
           ...r,
+          displayName: r.name || r.filename || r.fileName || fallbackName,
+          url,
           visitId: v._id || v.id,
           visitDate: v.date,
-        })
-      );
+        });
+      });
     }
     out.sort((a, b) => {
       const d = new Date(b.visitDate) - new Date(a.visitDate);
@@ -376,27 +503,191 @@ export default function DoctorDashboard() {
     return out;
   }, [active]);
 
-  const openReport = (r) => {
-    if (!r?.url) return toast.warning("Missing report URL");
-    window.open(r.url, "_blank");
+  /* ------------ VIEW/PRINT (with blob fallback) ------------ */
+
+  // Try multiple endpoints to get a file Blob (works even if the URL is not public)
+  const fetchReportBlob = async (r) => {
+    const pid = active?._id || active?.id;
+    const vid = r.visitId;
+    const rid = r._id || r.id;
+    const name =
+      r.displayName ||
+      r.name ||
+      r.filename ||
+      r.fileName ||
+      (r.url || r.fileUrl || r.link || "").split("/").pop();
+
+    const tries = [];
+    const add = (path, config = {}) =>
+      tries.push(() => api.get(path, { responseType: "blob", ...config }));
+
+    // Common REST patterns
+    if (rid) {
+      add(`/patients/${pid}/visits/${vid}/reports/${rid}/download`);
+      add(`/patients/${pid}/visits/${vid}/reports/${rid}`); // some APIs stream here
+      add(`/files/${rid}`);
+    }
+    if (name) {
+      add(`/patients/${pid}/visits/${vid}/reports/download`, { params: { name } });
+      add(`/patients/${pid}/visits/${vid}/report/download`, { params: { name } });
+      add(`/uploads/${name}`); // if server serves /uploads statically
+    }
+
+    // Last resort: hit the absolute URL via API client if same-origin
+    const raw = r?.url || r?.fileUrl || r?.link || r?.path || "";
+    if (raw) {
+      const abs = resolveUrl(raw);
+      const base = api?.defaults?.baseURL?.replace(/\/$/, "") || "";
+      if (abs.startsWith(base)) {
+        const rel = abs.slice(base.length) || "/";
+        add(rel[0] === "/" ? rel : `/${rel}`);
+      }
+    }
+
+    let lastErr;
+    for (const run of tries) {
+      try {
+        const res = await run();
+        const ct = res.headers["content-type"] || "application/octet-stream";
+        return {
+          blob: res.data,
+          contentType: ct,
+          filename: name || rid || "report",
+        };
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+    throw lastErr || new Error("Could not fetch report");
   };
 
-  const printReport = (r) => {
-    if (!r?.url) return toast.warning("Missing report URL");
-    const w = window.open("", "_blank");
-    if (!w) return;
-    const isPdf = /\.pdf($|\?)/i.test(r.url);
-    const html = isPdf
-      ? `<html><head><title>${r.name || "Report"}</title></head>
-         <body style="margin:0">
-           <iframe src="${r.url}" style="border:0;width:100vw;height:100vh" onload="setTimeout(()=>print(),200)"></iframe>
-         </body></html>`
-      : `<html><head><title>${r.name || "Report"}</title></head>
-         <body style="margin:0;display:flex;align-items:center;justify-content:center">
-           <img src="${r.url}" style="max-width:100%;max-height:100vh" onload="setTimeout(()=>print(),200)"/>
-         </body></html>`;
-    w.document.write(html);
-    w.document.close();
+  // Open report in new tab. If direct URL fails, fetch as blob and open.
+  const openReport = async (r) => {
+    try {
+      const raw = r?.url || r?.fileUrl || r?.link || r?.path || r?.displayName;
+      const direct = resolveUrl(raw);
+
+      if (direct) {
+        const tab = window.open(direct, "_blank");
+        if (tab) {
+          try {
+            const base = api?.defaults?.baseURL?.replace(/\/$/, "") || "";
+            if (direct.startsWith(base)) {
+              await api.get(direct.slice(base.length) || "/", { responseType: "arraybuffer" });
+            }
+            return; // reachable
+          } catch {
+            try {
+              const { blob, filename } = await fetchReportBlob(r);
+              const url = URL.createObjectURL(blob);
+              tab.location.href = url;
+              tab.document.title = filename;
+              return;
+            } catch (e) {
+              tab.close();
+              throw e;
+            }
+          }
+        }
+      }
+
+      // Blob fallback (if popup blocked or no direct URL)
+      const { blob } = await fetchReportBlob(r);
+      const url = URL.createObjectURL(blob);
+      window.open(url, "_blank");
+    } catch (e) {
+      console.error(e);
+      toast.error(e?.response?.data?.message || "Unable to open report");
+    }
+  };
+
+  const printReport = async (r) => {
+    const openPrintable = (url, title) => {
+      const w = window.open("", "_blank");
+      if (!w) return;
+      const isPdf = /\.pdf($|\?)/i.test(url);
+      const html = isPdf
+        ? `<html><head><title>${title || "Report"}</title></head>
+           <body style="margin:0">
+             <iframe src="${url}" style="border:0;width:100vw;height:100vh" onload="setTimeout(()=>print(),200)"></iframe>
+           </body></html>`
+        : `<html><head><title>${title || "Report"}</title></head>
+           <body style="margin:0;display:flex;align-items:center;justify-content:center">
+             <img src="${url}" style="max-width:100%;max-height:100vh" onload="setTimeout(()=>print(),200)"/>
+           </body></html>`;
+      w.document.write(html);
+      w.document.close();
+    };
+
+    try {
+      const raw = r?.url || r?.fileUrl || r?.link || r?.path || r?.displayName;
+      const direct = resolveUrl(raw);
+
+      if (direct) {
+        try {
+          const base = api?.defaults?.baseURL?.replace(/\/$/, "") || "";
+          if (direct.startsWith(base)) {
+            await api.get(direct.slice(base.length) || "/", { responseType: "arraybuffer" });
+          }
+          openPrintable(direct, r.displayName || r.name || "Report");
+          return;
+        } catch {
+          // fall through
+        }
+      }
+
+      const { blob, filename, contentType } = await fetchReportBlob(r);
+      const blobUrl = URL.createObjectURL(new Blob([blob], { type: contentType }));
+      openPrintable(blobUrl, filename);
+    } catch (e) {
+      console.error(e);
+      toast.error(e?.response?.data?.message || "Unable to print report");
+    }
+  };
+
+  /* ------------ DELETE (multi-attempt) ------------ */
+  const deleteReport = async (r) => {
+    const pid = active._id || active.id;
+    const vid = r.visitId;
+    const rid = r._id || r.id;
+    const name =
+      r.displayName ||
+      r.name ||
+      r.filename ||
+      r.fileName ||
+      (r.url || "").split("/").pop();
+
+    const attempts = [];
+
+    if (rid) {
+      // DELETE by id (path)
+      attempts.push(() => api.delete(`/patients/${pid}/visits/${vid}/reports/${rid}`));
+      // DELETE by id (query)
+      attempts.push(() => api.delete(`/patients/${pid}/visits/${vid}/reports`, { params: { id: rid } }));
+      attempts.push(() => api.delete(`/patients/${pid}/visits/${vid}/report`, { params: { id: rid } }));
+      // POST delete-by-id
+      attempts.push(() => api.post(`/patients/${pid}/visits/${vid}/reports/delete`, { id: rid }));
+    }
+
+    if (name) {
+      // DELETE/POST by filename
+      attempts.push(() => api.delete(`/patients/${pid}/visits/${vid}/reports`, { params: { name } }));
+      attempts.push(() => api.post(`/patients/${pid}/visits/${vid}/reports/delete`, { name }));
+    }
+
+    let lastErr;
+    for (const run of attempts) {
+      try {
+        await run();
+        await load();
+        toast.success("Report deleted");
+        return;
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+    console.error(lastErr);
+    toast.error(lastErr?.response?.data?.message || "Delete failed");
   };
 
   const printPrescription = () => {
@@ -429,9 +720,9 @@ export default function DoctorDashboard() {
       </style></head>
       <body>
         <div class="header">
-          <h1>MediCare Hospital</h1>
-          <p>123 Healthcare Street, New Delhi, India | Ph: +91 9876543210</p>
-          <p>Dr. John Doe - Physician</p>
+          <h1>${templateData.hospitalName}</h1>
+          <p>${templateData.hospitalAddress} | Ph: ${templateData.hospitalPhone}</p>
+          <p>${templateData.doctorName} - ${templateData.designation}</p>
         </div>
 
         <div class="section">
@@ -486,8 +777,8 @@ export default function DoctorDashboard() {
 
         <div class="footer">
           <p>____________________</p>
-          <p>Dr. John Doe</p>
-          <p>Registration No: MED12345</p>
+          <p>${templateData.doctorName}</p>
+          <p>Registration No: ${templateData.regNo}</p>
         </div>
 
         <script>window.onload=function(){ setTimeout(function(){ window.print(); }, 400); };</script>
@@ -1120,42 +1411,38 @@ export default function DoctorDashboard() {
                     {expanded.history ? <ChevronUp className="w-5 h-5" /> : <ChevronDown className="w-5 h-5" />}
                   </button>
 
-                  <div
-                    id="section-history"
-                    role="region"
-                    className={`p-4 pt-0 transition-all duration-200 ${
-                      expanded.history ? "max-h-[900px]" : "max-h-0 overflow-hidden"
-                    }`}
-                  >
-                    {(active.visits || []).length === 0 ? (
-                      <p className="text-sm text-slate-500 text-center py-4">No previous visits</p>
-                    ) : (
-                      <div className="space-y-3 max-h-96 overflow-auto pr-1">
-                        {[...active.visits].reverse().map((v, idx) => (
-                          <div key={v._id || v.id || idx} className="p-3 bg-slate-50 rounded-lg border border-slate-200">
-                            <p className="text-xs text-slate-500 mb-2">
-                              {new Date(v.date).toLocaleDateString("en-IN", {
-                                day: "2-digit",
-                                month: "short",
-                                year: "numeric",
-                              })}
-                            </p>
-                            {v.diagnosis && (
-                              <p className="text-sm">
-                                <span className="font-semibold">Diagnosis:</span> {String(v.diagnosis).toUpperCase()}
+                  {expanded.history && (
+                    <div id="section-history" role="region" className="p-4 pt-0">
+                      {(active.visits || []).length === 0 ? (
+                        <p className="text-sm text-slate-500 text-center py-4">No previous visits</p>
+                      ) : (
+                        <div className="space-y-3 max-h-96 overflow-auto pr-1">
+                          {[...active.visits].reverse().map((v, idx) => (
+                            <div key={v._id || v.id || idx} className="p-3 bg-slate-50 rounded-lg border border-slate-200">
+                              <p className="text-xs text-slate-500 mb-2">
+                                {new Date(v.date).toLocaleDateString("en-IN", {
+                                  day: "2-digit",
+                                  month: "short",
+                                  year: "numeric",
+                                })}
                               </p>
-                            )}
-                            {Array.isArray(v.medicines) && v.medicines.length > 0 && (
-                              <p className="text-sm">
-                                <span className="font-semibold">Medicines:</span>{" "}
-                                {v.medicines.map((m) => String(m).toUpperCase()).join(", ")}
-                              </p>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
+                              {v.diagnosis && (
+                                <p className="text-sm">
+                                  <span className="font-semibold">Diagnosis:</span> {String(v.diagnosis).toUpperCase()}
+                                </p>
+                              )}
+                              {Array.isArray(v.medicines) && v.medicines.length > 0 && (
+                                <p className="text-sm">
+                                  <span className="font-semibold">Medicines:</span>{" "}
+                                  {v.medicines.map((m) => String(m).toUpperCase()).join(", ")}
+                                </p>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {/* REPORTS */}
@@ -1173,73 +1460,69 @@ export default function DoctorDashboard() {
                     {expanded.reports ? <ChevronUp className="w-5 h-5" /> : <ChevronDown className="w-5 h-5" />}
                   </button>
 
-                  <div
-                    id="section-reports"
-                    role="region"
-                    className={`p-4 pt-0 transition-all duration-200 ${
-                      expanded.reports ? "max-h-[900px]" : "max-h-0 overflow-hidden"
-                    }`}
-                  >
-                    <label className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 transition cursor-pointer mb-3 disabled:opacity-60 disabled:cursor-not-allowed">
-                      <Upload className="w-4 h-4" />
-                      {uploading ? "Uploading..." : newestVisit ? "Upload to Latest Visit" : "Save a Visit First"}
-                      <input
-                        type="file"
-                        accept="application/pdf,image/*"
-                        className="hidden"
-                        onChange={onUploadReport}
-                        disabled={uploading || !newestVisit}
-                      />
-                    </label>
+                  {expanded.reports && (
+                    <div id="section-reports" role="region" className="p-4 pt-0">
+                      <label className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 transition cursor-pointer mb-3 disabled:opacity-60 disabled:cursor-not-allowed">
+                        <Upload className="w-4 h-4" />
+                        {uploading ? "Uploading..." : newestVisit ? "Upload to Latest Visit" : "Save a Visit First"}
+                        <input
+                          type="file"
+                          accept="application/pdf,image/*"
+                          className="hidden"
+                          onChange={onUploadReport}
+                          disabled={uploading || !newestVisit}
+                        />
+                      </label>
 
-                    {allReports.length === 0 ? (
-                      <p className="text-sm text-slate-500 text-center py-4">No reports uploaded</p>
-                    ) : (
-                      <div className="space-y-2">
-                        {allReports.map((r, idx) => (
-                          <div key={(r.url || "") + idx} className="flex items-center justify-between p-3 bg-slate-50 rounded-lg border">
-                            <div className="min-w-0">
-                              <p className="text-sm font-medium truncate">{r.name || "REPORT"}</p>
-                              <p className="text-[11px] text-slate-500">
-                                Visit:{" "}
-                                {new Date(r.visitDate).toLocaleDateString("en-IN", {
-                                  day: "2-digit",
-                                  month: "short",
-                                  year: "numeric",
-                                })}
-                              </p>
+                      {allReports.length === 0 ? (
+                        <p className="text-sm text-slate-500 text-center py-4">No reports uploaded</p>
+                      ) : (
+                        <div className="space-y-2">
+                          {allReports.map((r, idx) => (
+                            <div key={(r.url || "") + idx} className="flex items-center justify-between p-3 bg-slate-50 rounded-lg border">
+                              <div className="min-w-0">
+                                <p className="text-sm font-medium truncate">{r.displayName}</p>
+                                <p className="text-[11px] text-slate-500">
+                                  Visit:{" "}
+                                  {new Date(r.visitDate).toLocaleDateString("en-IN", {
+                                    day: "2-digit",
+                                    month: "short",
+                                    year: "numeric",
+                                  })}
+                                </p>
+                              </div>
+                              <div className="flex gap-1">
+                                <button
+                                  className="p-2 rounded hover:bg-blue-50 transition"
+                                  title="View"
+                                  aria-label="View report"
+                                  onClick={() => openReport(r)}
+                                >
+                                  <Eye className="w-4 h-4 text-blue-600" />
+                                </button>
+                                <button
+                                  className="p-2 rounded hover:bg-green-50 transition"
+                                  title="Print"
+                                  aria-label="Print report"
+                                  onClick={() => printReport(r)}
+                                >
+                                  <Printer className="w-4 h-4 text-green-600" />
+                                </button>
+                                <button
+                                  className="p-2 rounded hover:bg-red-50 transition"
+                                  title="Delete"
+                                  aria-label="Delete report"
+                                  onClick={() => deleteReport(r)}
+                                >
+                                  <Trash2 className="w-4 h-4 text-red-600" />
+                                </button>
+                              </div>
                             </div>
-                            <div className="flex gap-1">
-                              <button
-                                className="p-2 rounded hover:bg-blue-50 transition"
-                                title="View"
-                                aria-label="View report"
-                                onClick={() => openReport(r)}
-                              >
-                                <Eye className="w-4 h-4 text-blue-600" />
-                              </button>
-                              <button
-                                className="p-2 rounded hover:bg-green-50 transition"
-                                title="Print"
-                                aria-label="Print report"
-                                onClick={() => printReport(r)}
-                              >
-                                <Printer className="w-4 h-4 text-green-600" />
-                              </button>
-                              <button
-                                className="p-2 rounded opacity-40 cursor-not-allowed"
-                                title="Delete not available"
-                                disabled
-                                aria-label="Delete not available"
-                              >
-                                <Trash2 className="w-4 h-4 text-slate-400" />
-                              </button>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {/* TEMPLATES */}
@@ -1257,33 +1540,37 @@ export default function DoctorDashboard() {
                     {expanded.templates ? <ChevronUp className="w-5 h-5" /> : <ChevronDown className="w-5 h-5" />}
                   </button>
 
-                  <div
-                    id="section-templates"
-                    role="region"
-                    className={`p-4 pt-0 transition-all duration-200 ${
-                      expanded.templates ? "max-h-[900px]" : "max-h-0 overflow-hidden"
-                    }`}
-                  >
-                    <input
-                      className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-                      placeholder="Search templates..."
-                      value={tq}
-                      onChange={(e) => setTq(e.target.value)}
-                      aria-label="Search templates"
-                    />
+                  {expanded.templates && (
+                    <div id="section-templates" role="region" className="p-4 pt-0">
+                      <input
+                        className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                        placeholder="Search templates..."
+                        value={tq}
+                        onChange={(e) => setTq(e.target.value)}
+                        aria-label="Search templates"
+                      />
 
-                    <div className="space-y-2 mt-3">
-                      {filteredTemplates.map((tpl) => (
-                        <div key={tpl.id} className="flex items-center justify-between p-3 bg-slate-50 rounded-lg border">
-                          <div>
-                            <p className="text-sm font-medium">{tpl.title}</p>
-                            <p className="text-[11px] text-slate-500">{tpl.category}</p>
-                          </div>
-                          <button
-                            onClick={() => {
-                              const w = window.open("", "_blank");
-                              if (!w) return;
-                              const html = `
+                      <div className="space-y-2 mt-3">
+                        {filteredTemplates.map((tpl) => (
+                          <div key={tpl.id} className="flex items-center justify-between p-3 bg-slate-50 rounded-lg border">
+                            <div>
+                              <p className="text-sm font-medium">{tpl.title}</p>
+                              <p className="text-[11px] text-slate-500">{tpl.category}</p>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <button
+                                onClick={() => setEditingTpl(tpl)}
+                                className="px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-700 bg-slate-200 hover:bg-slate-300 active:scale-[.99] transition"
+                                aria-label={`Edit ${tpl.title}`}
+                                title="Edit before printing"
+                              >
+                                Edit
+                              </button>
+                              <button
+                                onClick={() => {
+                                  const w = window.open("", "_blank");
+                                  if (!w) return;
+                                  const html = `
                                 <html><head><title>${tpl.title}</title>
                                 <style>
                                   body{font-family:Arial,sans-serif;padding:30px;max-width:800px;margin:0 auto}
@@ -1301,9 +1588,9 @@ export default function DoctorDashboard() {
                                 </style></head>
                                 <body>
                                   <div class="header">
-                                    <h1>MediCare Hospital</h1>
-                                    <p>123 Healthcare Street, New Delhi, India</p>
-                                    <p>Phone: +91 9876543210 | Email: contact@medicare.com</p>
+                                    <h1>${templateData.hospitalName}</h1>
+                                    <p>${templateData.hospitalAddress}</p>
+                                    <p>Phone: ${templateData.hospitalPhone} | Email: ${templateData.hospitalEmail}</p>
                                   </div>
 
                                   <div class="certificate-title">${tpl.title}</div>
@@ -1319,32 +1606,35 @@ export default function DoctorDashboard() {
                                     ${visit.diagnosis ? `<p><span class="label">Diagnosis:</span> ${String(visit.diagnosis).toUpperCase()}</p>` : ""}
                                     ${tpl.category === "LEAVE" ? `<p>The patient is advised to take rest for the period of recovery.</p>` : ""}
                                     ${tpl.category === "CERTIFICATE" && tpl.title.includes("Fitness") ? `<p>The patient is found medically fit for all activities.</p>` : ""}
+                                    ${templateData.customNote ? `<p>${templateData.customNote}</p>` : ""}
                                   </div>
 
                                   <div class="footer">
                                     <div class="signature-line"></div>
-                                    <p style="margin:5px 0;"><strong>Dr. John Doe</strong></p>
-                                    <p style="margin:5px 0;">Physician</p>
-                                    <p style="margin:5px 0;">Registration No: MED12345</p>
+                                    <p style="margin:5px 0;"><strong>${templateData.doctorName}</strong></p>
+                                    <p style="margin:5px 0;">${templateData.designation}</p>
+                                    <p style="margin:5px 0;">Registration No: ${templateData.regNo}</p>
                                     <p style="margin:5px 0;color:#666;">Date: ${new Date().toLocaleDateString("en-IN")}</p>
                                   </div>
 
-                                  <script>window.onload=function(){setTimeout(function(){window.print()},500)};</script>
+                                  <script>window.onload=function(){setTimeout(function(){window.print()},500)};<\/script>
                                 </body></html>`;
-                              w.document.write(html);
-                              w.document.close();
-                            }}
-                            className="px-3 py-1.5 rounded-lg text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 active:scale-[.99] transition inline-flex items-center gap-1"
-                            aria-label={`Print ${tpl.title}`}
-                            title="Print"
-                          >
-                            <Printer className="w-3 h-3" />
-                            Print
-                          </button>
-                        </div>
-                      ))}
+                                  w.document.write(html);
+                                  w.document.close();
+                                }}
+                                className="px-3 py-1.5 rounded-lg text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 active:scale-[.99] transition inline-flex items-center gap-1"
+                                aria-label={`Print ${tpl.title}`}
+                                title="Print"
+                              >
+                                <Printer className="w-3 h-3" />
+                                Print
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
                     </div>
-                  </div>
+                  )}
                 </div>
               </div>
             )}
@@ -1369,9 +1659,15 @@ export default function DoctorDashboard() {
           </button>
         </div>
       )}
+
+      {/* Template editor modal */}
+      <TemplateEditor
+        open={!!editingTpl}
+        tpl={editingTpl}
+        value={templateData}
+        onClose={() => setEditingTpl(null)}
+        onSave={(v) => setTemplateData(v)}
+      />
     </div>
   );
 }
-
-/* -------------------- Tiny keyframes for subtle fade -------------------- */
-// If you want local keyframes, ensure your tooling supports it or move to a global CSS.
